@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D FLICK DART // GROUND REALM</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #090d16;
+            font-family: 'Segoe UI', Roboto, sans-serif;
+            user-select: none;
+        }
+        #game-view {
+            width: 100%;
+            height: 100%;
+            display: block;
+            cursor: none; /* Hide cursor for custom 3D crosshair/hand visualization */
+        }
+        .hud-overlay {
+            position: absolute;
+            top: 25px;
+            left: 25px;
+            color: #fff;
+            pointer-events: none;
+            background: rgba(9, 13, 22, 0.85);
+            border: 2px solid #ffaa00;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(255, 170, 0, 0.2);
+            backdrop-filter: blur(8px);
+            z-index: 10;
+            min-width: 220px;
+        }
+        .hud-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #64748b;
+            margin-bottom: 5px;
+            font-weight: 700;
+        }
+        .hud-metric {
+            font-size: 1.8rem;
+            font-weight: 800;
+            color: #ffaa00;
+            text-shadow: 0 0 10px rgba(255, 170, 0, 0.4);
+            margin-bottom: 10px;
+        }
+        .feedback-text {
+            font-size: 0.9rem;
+            color: #00ffcc;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .controls-card {
+            position: absolute;
+            bottom: 25px;
+            right: 25px;
+            background: rgba(9, 13, 22, 0.9);
+            border: 1px solid #1e293b;
+            padding: 15px 20px;
+            border-radius: 6px;
+            color: #cbd5e1;
+            font-size: 0.8rem;
+            pointer-events: none;
+            line-height: 1.8;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            z-index: 10;
+        }
+        .key-btn {
+            background: #ffaa00;
+            color: #090d16;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: bold;
+            font-size: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="hud-overlay">
+        <div class="hud-title">Score Matrix</div>
+        <div id="score-display" class="hud-metric">0 PTS</div>
+        <div class="hud-title">Action Status</div>
+        <div id="feedback" class="feedback-text">READY TO AIM</div>
+    </div>
+
+    <div class="controls-card">
+        <p style="color: #ffaa00; font-weight: bold; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;">Flick Throw Mechanics</p>
+        <p><span class="key-btn">Click & Hold</span> Arm the Dart Setup</p>
+        <p><span class="key-btn">Flick Upwards + Release</span> Throw (Speed dictates power!)</p>
+        <p><span class="key-btn">R</span> Clear Board / Reset Field</p>
+    </div>
+
+    <canvas id="game-view"></canvas>
+
+    <script>
+        const canvas = document.getElementById('game-view');
+        const ctx = canvas.getContext('2d');
+
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        let score = 0;
+        let mouseX = width / 2;
+        let mouseY = height * 0.7;
+        
+        // Mouse tracking history arrays for tracking precise velocity vectors
+        let mouseHistory = [];
+        let isAiming = false;
+
+        // Camera Looking at the Ground Target
+        const camera = {
+            x: 0,
+            y: 9,       
+            z: -10,     
+            fov: 380,   
+            pitch: 0.42 
+        };
+
+        const targetPos = { x: 0, y: 0, z: 20 }; 
+        const targetRadius = 5.0;
+
+        let dart = {
+            active: false,
+            x: 0, y: 0, z: 0,
+            vx: 0, vy: 0, vz: 0,
+            gravity: -0.012,
+            trail: []
+        };
+
+        // Standard 3D projection equation mapping onto pseudo lens matrices 
+        function project3D(x, y, z) {
+            let cx = x - camera.x;
+            let cy = y - camera.y;
+            let cz = z - camera.z;
+
+            let cosP = Math.cos(camera.pitch);
+            let sinP = Math.sin(camera.pitch);
+            
+            let rotY = cy * cosP - cz * sinP;
+            let rotZ = cy * sinP + cz * cosP;
+
+            if (rotZ <= 0.1) rotZ = 0.1;
+
+            let scale = camera.fov / rotZ;
+            return {
+                x: (width / 2) + cx * scale,
+                y: (height / 2) - rotY * scale,
+                scale: scale
+            };
+        }
+
+        // Mouse Event Handlers
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+
+            // Log recent coordinate records to measure momentum vectors
+            mouseHistory.push({ x: mouseX, y: mouseY, time: Date.now() });
+            if (mouseHistory.length > 8) mouseHistory.shift();
+        });
+
+        window.addEventListener('mousedown', (e) => {
+            if (!dart.active && e.button === 0) {
+                isAiming = true;
+                mouseHistory = [];
+                document.getElementById('feedback').innerText = "ARMED: FLICK UP!";
+            }
+        });
+
+        window.addEventListener('mouseup', (e) => {
+            if (isAiming && e.button === 0) {
+                isAiming = false;
+                processFlickThrow();
+            }
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key.toLowerCase() === 'r') {
+                resetDart("READY TO AIM");
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        });
+
+        function processFlickThrow() {
+            if (mouseHistory.length < 2) {
+                resetDart("TOO SLOW! FLICK IT");
+                return;
+            }
+
+            // Calculate directional speed delta over history buffer blocks
+            let first = mouseHistory[0];
+            let last = mouseHistory[mouseHistory.length - 1];
+            let dt = (last.time - first.time) || 1;
+
+            // Pixels per millisecond physics mappings
+            let velocityX = (last.x - first.x) / dt;
+            let velocityY = (last.y - first.y) / dt; // Negative means moving upward on screen
+
+            // Verify if motion is a distinct forward flick (up screen space)
+            if (velocityY >= -0.1) {
+                resetDart("THROW FORWARD!");
+                return;
+            }
+
+            // Conversion parameters converting pixel kinetics into 3D Space vectors
+            let flickSpeed = Math.abs(velocityY);
+            
+            dart.active = true;
+            dart.x = 0;
+            dart.y = 5.5; 
+            dart.z = -7;
+            dart.trail = [];
+
+            // Compute Depth & Arcing properties based directly on flick intensity metrics
+            dart.vz = Math.min(0.85, flickSpeed * 0.38);  // Forward velocity map depth linear scaling
+            dart.vx = velocityX * 0.45;                  // Left/Right skew angle derived from horizontal tracking shift
+            dart.vy = 0.12 + (flickSpeed * 0.08);         // Launch upward vector angle offset calculation
+
+            document.getElementById('feedback').innerText = "FLIGHT PATH ACTIVE";
+        }
+
+        function resetDart(msg) {
+            dart.active = false;
+            document.getElementById('feedback').innerText = msg;
+        }
+
+        function evaluateScore(hitX, hitZ) {
+            let distance = Math.sqrt(Math.pow(hitX - targetPos.x, 2) + Math.pow(hitZ - targetPos.z, 2));
+            
+            if (distance <= targetRadius) {
+                let accuracy = 1 - (distance / targetRadius);
+                let hitPoints = Math.floor(accuracy * 100);
+                
+                if (hitPoints > 92) {
+                    score += 150;
+                    resetDart("BULLSEYE CRITICAL! +150");
+                } else {
+                    score += hitPoints;
+                    resetDart(`TARGET HIT! +${hitPoints}`);
+                }
+                document.getElementById('score-display').innerText = `${score} PTS`;
+            } else {
+                resetDart("OFF TARGET OUT OF BOUNDS");
+            }
+        }
+
+        // Loop Frame Runtime Simulation Pipeline Engine
+        function tick() {
+            requestAnimationFrame(tick);
+
+            // 1. Position Matrix Physics Updates
+            if (dart.active) {
+                dart.trail.push({x: dart.x, y: dart.y, z: dart.z});
+                if(dart.trail.length > 20) dart.trail.shift();
+
+                dart.x += dart.vx;
+                dart.y += dart.vy;
+                dart.z += dart.vz;
+                dart.vy += dart.gravity;
+
+                if (dart.y <= 0) {
+                    dart.y = 0;
+                    evaluateScore(dart.x, dart.z);
+                }
+            }
+
+            // 2. Clear Scene & Geometry Drawing Trace Calls
+            ctx.fillStyle = "#090d16";
+            ctx.fillRect(0, 0, width, height);
+
+            // Ground Isometric Space Guide Matrix
+            ctx.strokeStyle = "rgba(30, 41, 59, 0.5)";
+            ctx.lineWidth = 1;
+            for (let i = -20; i <= 20; i += 4) {
+                let pStart = project3D(i, 0, -8);
+                let pEnd = project3D(i, 0, 45);
+                ctx.beginPath(); ctx.moveTo(pStart.x, pStart.y); ctx.lineTo(pEnd.x, pEnd.y); ctx.stroke();
+
+                let pLeft = project3D(-20, 0, i + 15);
+                let pRight = project3D(20, 0, i + 15);
+                ctx.beginPath(); ctx.moveTo(pLeft.x, pLeft.y); ctx.lineTo(pRight.x, pRight.y); ctx.stroke();
+            }
+
+            // Draw Ground Bullseye Targets Concentric Rings Elements
+            let targetDivisions = [1.0, 0.8, 0.55, 0.3, 0.08];
+            let targetColors = ["#1e293b", "#ffaa00", "#1e293b", "#ffaa00", "#ff3366"];
+            
+            for (let r = 0; r < targetDivisions.length; r++) {
+                ctx.fillStyle = targetColors[r];
+                ctx.beginPath();
+                let rad = targetRadius * targetDivisions[r];
+                for (let theta = 0; theta <= Math.PI * 2; theta += 0.1) {
+                    let rx = targetPos.x + Math.sin(theta) * rad;
+                    let rz = targetPos.z + Math.cos(theta) * rad;
+                    let pt = project3D(rx, 0, rz);
+                    if (theta === 0) ctx.moveTo(pt.x, pt.y);
+                    else ctx.lineTo(pt.x, pt.y);
+                }
+                ctx.closePath();
+                ctx.fill();
+                ctx.strokeStyle = "#090d16";
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // Dynamic Hand/Aim Crosshair Indicator Element
+            if (!dart.active) {
+                ctx.save();
+                ctx.translate(mouseX, mouseY);
+                
+                if (isAiming) {
+                    // Draw visual tension indicator rings when pulling arm back
+                    ctx.strokeStyle = "#ff3366";
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, 25, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
+                // Render floating guide scope reticle lines
+                ctx.strokeStyle = isAiming ? "#ff3366" : "#ffaa00";
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.moveTo(-15, 0); ctx.lineTo(15, 0);
+                ctx.moveTo(0, -15); ctx.lineTo(0, 15);
+                ctx.stroke();
+
+                // Center core micro-node
+                ctx.fillStyle = "#ffffff";
+                ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI*2); ctx.fill();
+
+                ctx.restore();
+            }
+
+            // Draw Vector Flying Dart Mesh Objects Array Pipeline Steps
+            if (dart.active) {
+                if (dart.trail.length > 1) {
+                    ctx.beginPath();
+                    let tStart = project3D(dart.trail[0].x, dart.trail[0].y, dart.trail[0].z);
+                    ctx.moveTo(tStart.x, tStart.y);
+                    for (let t = 1; t < dart.trail.length; t++) {
+                        let tPt = project3D(dart.trail[t].x, dart.trail[t].y, dart.trail[t].z);
+                        ctx.lineTo(tPt.x, tPt.y);
+                    }
+                    ctx.strokeStyle = "rgba(255, 170, 0, 0.35)";
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                }
+
+                let pDart = project3D(dart.x, dart.y, dart.z);
+                let sizeScalar = pDart.scale * 0.18; 
+
+                ctx.save();
+                ctx.translate(pDart.x, pDart.y);
+                
+                let angle = Math.atan2(-dart.vy, dart.vz);
+                ctx.rotate(angle);
+
+                // Body shaft frame
+                ctx.fillStyle = "#ffffff";
+                ctx.fillRect(-sizeScalar, -sizeScalar/5, sizeScalar * 2, sizeScalar / 2.5);
+                
+                // Tail wings array elements
+                ctx.fillStyle = "#ffaa00";
+                ctx.beginPath();
+                ctx.moveTo(-sizeScalar, -sizeScalar/1.8);
+                ctx.lineTo(-sizeScalar + sizeScalar/1.8, 0);
+                ctx.lineTo(-sizeScalar, sizeScalar/1.8);
+                ctx.closePath();
+                ctx.fill();
+
+                // Nose tip pointer indicator
+                ctx.fillStyle = "#ff3366";
+                ctx.beginPath();
+                ctx.moveTo(sizeScalar, -sizeScalar/5);
+                ctx.lineTo(sizeScalar + sizeScalar/1.8, 0);
+                ctx.lineTo(sizeScalar, sizeScalar/5);
+                ctx.closePath();
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        tick();
+    </script>
+</body>
+</html>
